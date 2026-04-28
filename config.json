@@ -1,0 +1,11 @@
+{
+  "asr": {
+    "hotword": "skill prompt LLM ASR API config plugin agent FunASR LM Studio schedule SFT ONNX endpoint socket MCP"
+  },
+  "llm": {
+    "enabled": true,
+    "base_url": "http://localhost:1234",
+    "model": "google/gemma-4-26b-a4b",
+    "timeout": 30
+  }
+}
