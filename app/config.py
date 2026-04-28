@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "hotkeys": {"toggle": "f2"},
+    "hotkeys": {"toggle": "opt_r"},
     "audio": {
         "sample_rate": 16000,
         "block_ms": 20,
@@ -59,6 +59,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "min_chars": 1,
         "method": "auto",
         "append_newline": False,
+    },
+    # LLM 后处理：去除口语词、修正语病（需要本地 LM Studio 或兼容 API）
+    "llm": {
+        "enabled": False,
+        "base_url": "http://localhost:1234",
+        "model": "",
+        "system_prompt": "",
+        "timeout": 10,
     },
     "logging": {"dir": "logs", "level": "INFO"},
 }

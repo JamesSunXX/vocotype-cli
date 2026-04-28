@@ -7,10 +7,10 @@ import logging
 import threading
 import time
 
-import keyboard
-
 from app import HotkeyManager, TranscriptionResult, TranscriptionWorker, load_config, type_text
 from app.plugins.dataset_recorder import wrap_result_handler
+from app.plugins.llm_refiner import create_refiner
+from app.plugins.llm_refiner import wrap_result_handler as wrap_llm_handler
 from app.logging_config import setup_logging
 
 
@@ -59,6 +59,10 @@ def main() -> None:
     
     # 创建result handler（需要worker引用）
     worker.on_result = _make_result_handler(output_method, append_newline, worker)
+    # LLM 精炼（在 ASR 之后、文本注入之前）
+    refiner = create_refiner(config)
+    if refiner:
+        worker.on_result = wrap_llm_handler(worker.on_result, refiner)
     if args.save_dataset:
         worker.on_result = wrap_result_handler(worker.on_result, worker, args.dataset_dir)
     
@@ -74,7 +78,7 @@ def main() -> None:
             input("按 Enter 停止并退出...")
             _toggle(worker)
         else:
-            keyboard.wait()
+            hotkeys.wait()
     except KeyboardInterrupt:
         logger.info("用户中断，正在退出...")
     finally:

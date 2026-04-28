@@ -354,13 +354,36 @@ class TranscriptionWorker:
                 return None
             try:
                 combined = np.concatenate(self._buffer, axis=0)
-                logger.info("会话录音合并完成，总样本数=%s", combined.size)
                 self._buffer.clear()
-                return combined
             except Exception as exc:
                 logger.error("合并音频缓冲区时出错: %s", exc)
-                self._buffer.clear()  # 即使出错也清理缓冲区
+                self._buffer.clear()
                 return None
+
+        # 如果录音采样率与目标不同，进行重采样
+        if self.audio.needs_resample:
+            try:
+                import librosa
+                float_audio = combined.astype(np.float32) / 32768.0
+                resampled = librosa.resample(
+                    float_audio,
+                    orig_sr=self.audio.actual_sample_rate,
+                    target_sr=self._audio_cfg["sample_rate"],
+                )
+                combined = (resampled * 32768.0).clip(-32768, 32767).astype(np.int16)
+                logger.info(
+                    "音频重采样 %dHz→%dHz 完成，总样本数=%s",
+                    self.audio.actual_sample_rate,
+                    self._audio_cfg["sample_rate"],
+                    combined.size,
+                )
+            except Exception as exc:
+                logger.error("音频重采样失败: %s", exc)
+                return None
+        else:
+            logger.info("会话录音合并完成，总样本数=%s", combined.size)
+
+        return combined
 
     def _write_temp_wav(self, samples: np.ndarray) -> str:
         import wave

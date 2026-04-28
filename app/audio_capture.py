@@ -35,6 +35,8 @@ class AudioCapture:
         self._stream: Optional[sd.RawInputStream] = None
         self._lock = threading.Lock()
         self._running = False
+        # 实际使用的采样率（可能与请求不同，见 _resolve_sample_rate）
+        self._actual_sample_rate: int = sample_rate
 
         self._block_size = int(self.sample_rate * self.block_ms / 1000)
         if self._block_size <= 0:
@@ -86,19 +88,45 @@ class AudioCapture:
                 break
 
     def _create_stream(self, device: Optional[str]) -> sd.RawInputStream:
+        # 先尝试目标采样率，失败则回退到设备原生采样率
+        for rate in (self.sample_rate, self._get_device_native_rate(device)):
+            if rate is None:
+                continue
+            try:
+                block_size = int(rate * self.block_ms / 1000)
+                stream = sd.RawInputStream(
+                    samplerate=rate,
+                    blocksize=block_size,
+                    dtype="int16",
+                    channels=1,
+                    callback=self._callback,
+                    device=device,
+                )
+                self._actual_sample_rate = int(rate)
+                if rate != self.sample_rate:
+                    logger.info("设备不支持 %dHz，使用原生 %dHz 录音（后续重采样）", self.sample_rate, rate)
+                return stream
+            except Exception:
+                continue
+        msg = "无法创建音频输入流：所有采样率均失败"
+        logger.error(msg)
+        raise AudioCaptureError(msg)
+
+    @staticmethod
+    def _get_device_native_rate(device) -> Optional[int]:
         try:
-            return sd.RawInputStream(
-                samplerate=self.sample_rate,
-                blocksize=self._block_size,
-                dtype="int16",
-                channels=1,
-                callback=self._callback,
-                device=device,
-            )
-        except Exception as exc:
-            msg = f"无法创建音频输入流: {exc}"
-            logger.error(msg)
-            raise AudioCaptureError(msg) from exc
+            info = sd.query_devices(device or sd.default.device[0], kind="input")
+            return int(info["default_samplerate"])
+        except Exception:
+            return None
+
+    @property
+    def needs_resample(self) -> bool:
+        return self._actual_sample_rate != self.sample_rate
+
+    @property
+    def actual_sample_rate(self) -> int:
+        return self._actual_sample_rate
 
     def _fallback_device(self) -> Optional[int]:
         try:

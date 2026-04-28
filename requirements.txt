@@ -1,5 +1,5 @@
 sounddevice==0.5.2
-keyboard==0.13.5
+pynput==1.8.1
 pyperclip==1.11.0
 librosa==0.11.0
 soundfile==0.13.1
