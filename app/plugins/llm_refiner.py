@@ -58,6 +58,7 @@ def create_refiner(config: dict) -> Optional[Callable[[str], str]]:
                 {"role": "user", "content": text},
             ],
             "temperature": 0,
+            "reasoning_effort": "none",
         }).encode()
         req = request.Request(
             endpoint, data=body,
@@ -93,6 +94,20 @@ def create_refiner(config: dict) -> Optional[Callable[[str], str]]:
                 return text
             if len(refined) > len(text) * 2 + 20:
                 logger.warning("LLM 输出过长 (%d→%d 字符)，疑似跑飞，使用原文", len(text), len(refined))
+                return text
+            # 跑飞检测
+            _punct = "，。？！、；：""''…—·\n ,.?!;:\"'  "
+            src = "".join(c for c in text if c not in _punct)
+            dst = "".join(c for c in refined if c not in _punct)
+            # 1) 原文核心片段应在输出中保留
+            if len(src) >= 2:
+                has_overlap = any(src[i:i+2] in dst for i in range(len(src) - 1))
+                if not has_overlap:
+                    logger.warning("LLM 输出与原文无内容重叠，疑似跑飞，使用原文")
+                    return text
+            # 2) 输出不应是对输入的"回答"（以第一人称开头且原文不含第一人称）
+            if refined.lstrip()[0:1] == "我" and "我" not in text:
+                logger.warning("LLM 输出疑似回答而非修正，使用原文")
                 return text
 
             elapsed = time.time() - t0
