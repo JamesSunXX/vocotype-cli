@@ -19,6 +19,13 @@ MODELS = {
         ),
         "type": "asr",
     },
+    "sensevoice": {
+        "name": os.environ.get(
+            "FUNASR_SENSEVOICE_MODEL",
+            "iic/SenseVoiceSmall",
+        ),
+        "type": "sensevoice",
+    },
     "vad": {
         "name": os.environ.get(
             "FUNASR_VAD_MODEL",
@@ -42,6 +49,10 @@ def get_models_for_download():
         {
             "name": MODELS["asr"]["name"],
             "type": "asr",
+        },
+        {
+            "name": MODELS["sensevoice"]["name"],
+            "type": "sensevoice",
         },
         {
             "name": MODELS["vad"]["name"],

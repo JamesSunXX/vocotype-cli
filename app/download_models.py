@@ -50,7 +50,7 @@ def main():
     models = get_models_for_download()
     
     # 进度跟踪
-    progress = {"asr": 0, "vad": 0, "punc": 0}
+    progress = {"asr": 0, "sensevoice": 0, "vad": 0, "punc": 0}
     results = {}
     completed_count = 0
     total_count = len(models)

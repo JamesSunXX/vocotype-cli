@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 class FunASRServer:
     def __init__(self):
         self.asr_model = None
+        self.sensevoice_model = None  # SenseVoice 主力模型
         self.vad_model = None
         self.punc_model = None
         self.initialized = False
@@ -45,15 +46,20 @@ class FunASRServer:
         self.model_revision = MODEL_REVISION
         self.model_names = {
             "asr": MODELS["asr"]["name"],
+            "sensevoice": MODELS["sensevoice"]["name"],
             "vad": MODELS["vad"]["name"],
             "punc": MODELS["punc"]["name"],
         }
 
+        # 双引擎时长阈值（秒），短于此值用 Paraformer，长于此值用 SenseVoice
+        self.sensevoice_threshold = float(os.environ.get("FUNASR_SENSEVOICE_THRESHOLD", "2.0"))
+
         self.device = self._select_device()
         logger.info(
-            "FunASR服务器初始化，模型版本=%s，设备=%s",
+            "FunASR服务器初始化，模型版本=%s，设备=%s，SenseVoice阈值=%.1fs",
             self.model_revision,
             self.device,
+            self.sensevoice_threshold,
         )
 
         # 设置信号处理
@@ -71,10 +77,13 @@ class FunASRServer:
         """清理所有模型和资源"""
         logger.info("开始清理 FunASR 服务器资源")
         try:
-            # 清理模型引用（ONNX 的 InferenceSession 会在对象销毁时自动释放）
             if self.asr_model is not None:
                 logger.debug("释放 ASR 模型")
                 self.asr_model = None
+            
+            if self.sensevoice_model is not None:
+                logger.debug("释放 SenseVoice 模型")
+                self.sensevoice_model = None
             
             if self.vad_model is not None:
                 logger.debug("释放 VAD 模型")
@@ -84,7 +93,6 @@ class FunASRServer:
                 logger.debug("释放标点模型")
                 self.punc_model = None
             
-            # 执行最后一次内存清理（包括 gc.collect 强制回收）
             self._cleanup_memory()
             
             logger.info("FunASR 服务器资源清理完成")
@@ -167,6 +175,27 @@ class FunASRServer:
             logger.error(f"ASR模型加载失败: {str(e)}")
             logger.debug(traceback.format_exc())
             self.asr_model = None
+            return False
+
+    def _load_sensevoice_model(self):
+        """加载 SenseVoice 模型（使用 funasr AutoModel）"""
+        try:
+            from funasr import AutoModel
+
+            model_name = self.model_names["sensevoice"]
+            logger.info("开始加载 SenseVoice 模型: %s", model_name)
+
+            self.sensevoice_model = AutoModel(
+                model=model_name,
+                trust_remote_code=True,
+                device=self.device,
+            )
+            logger.info("SenseVoice 模型加载完成")
+            return True
+        except Exception as e:
+            logger.error(f"SenseVoice 模型加载失败: {str(e)}")
+            logger.debug(traceback.format_exc())
+            self.sensevoice_model = None
             return False
 
     def _load_vad_model(self):
@@ -306,13 +335,18 @@ class FunASRServer:
             load_vad = os.environ.get("FUNASR_USE_VAD", "false").lower() not in ("0", "false", "no")
             load_punc = os.environ.get("FUNASR_USE_PUNC", "true").lower() not in ("0", "false", "no")
 
-            # 创建并启动线程（ASR 必须，VAD/PUNC 可选）
+            # 创建并启动线程（ASR + SenseVoice 必须，VAD/PUNC 可选）
             threads = [
                 threading.Thread(
                     target=load_model_thread,
                     args=("asr", self._load_asr_model),
                     daemon=True,
-                )
+                ),
+                threading.Thread(
+                    target=load_model_thread,
+                    args=("sensevoice", self._load_sensevoice_model),
+                    daemon=True,
+                ),
             ]
             if load_vad:
                 threads.append(
@@ -351,13 +385,14 @@ class FunASRServer:
                     "type": "timeout_error",
                 }
 
-            # 检查加载结果
-            failed_models = [name for name, success in results.items() if not success]
-
-            if failed_models:
-                error_msg = f"以下模型加载失败: {', '.join(failed_models)}"
-                logger.error(error_msg)
-                return {"success": False, "error": error_msg, "type": "init_error"}
+            # 检查加载结果（SenseVoice 失败不阻塞，仅 ASR/Paraformer 是必须的）
+            if not results.get("asr", False):
+                return {"success": False, "error": "ASR (Paraformer) 模型加载失败", "type": "init_error"}
+            if not results.get("sensevoice", False):
+                logger.warning("SenseVoice 模型加载失败，将仅使用 Paraformer 引擎")
+            failed_optional = [n for n in ("vad", "punc") if n in results and not results[n]]
+            if failed_optional:
+                logger.warning("可选模型加载失败: %s", ", ".join(failed_optional))
 
             total_time = time.time() - start_time
             self.initialized = True
@@ -413,76 +448,80 @@ class FunASRServer:
 
             # 执行语音识别（VAD 处理）
             if default_options["use_vad"] and self.vad_model:
-                # funasr_onnx.Fsmn_vad 直接调用，返回 segments [[start_ms, end_ms], ...]
                 vad_result = self.vad_model(audio_path)
                 logger.info("VAD处理完成，检测到 %s 个语音段", len(vad_result[0]) if vad_result else 0)
             elif default_options["use_vad"] and not self.vad_model:
                 logger.warning("use_vad=True 但VAD模型未加载，跳过VAD处理")
 
-            # 执行ASR识别（根据模型类型使用不同接口）
-            if hasattr(self.asr_model, "generate"):
-                # PyTorch 模型使用 generate 方法
-                asr_result = self.asr_model.generate(
+            # 根据音频时长选择引擎：长音频用 SenseVoice，短音频用 Paraformer
+            audio_duration = self._get_audio_duration(audio_path)
+            threshold = float(default_options.get("sensevoice_threshold", self.sensevoice_threshold))
+            use_sensevoice = (
+                self.sensevoice_model is not None
+                and audio_duration >= threshold
+            )
+
+            if use_sensevoice:
+                # SenseVoice：自带标点，无需额外标点恢复
+                logger.info("使用 SenseVoice 引擎 (时长=%.2fs >= %.1fs)", audio_duration, threshold)
+                sv_result = self.sensevoice_model.generate(
                     input=audio_path,
-                    batch_size_s=default_options["batch_size_s"],
-                    hotword=default_options["hotword"],
-                    cache={},
+                    language=default_options.get("language", "auto"),
+                    use_itn=True,
                 )
+                # 提取文本
+                if isinstance(sv_result, list) and sv_result:
+                    item = sv_result[0]
+                    raw_text = item.get("text", str(item)) if isinstance(item, dict) else str(item)
+                else:
+                    raw_text = str(sv_result)
+                # SenseVoice 输出已含标点
+                final_text = raw_text
+                engine_used = "sensevoice"
             else:
-                # ONNX 模型直接调用（funasr_onnx.Paraformer）
+                # Paraformer ONNX：短音频快速响应
+                logger.info("使用 Paraformer 引擎 (时长=%.2fs < %.1fs)", audio_duration, threshold)
                 asr_result = self.asr_model([audio_path])
 
-            # 提取识别文本（兼容 PyTorch 和 ONNX 两种格式）
-            if isinstance(asr_result, list) and len(asr_result) > 0:
-                first_item = asr_result[0]
-                # PyTorch 格式: [{"text": "..."}]
-                if isinstance(first_item, dict) and "text" in first_item:
-                    raw_text = first_item["text"]
-                # ONNX 格式: [{"preds": (text_string, token_list)}]
-                elif isinstance(first_item, dict) and "preds" in first_item:
-                    preds = first_item["preds"]
-                    if isinstance(preds, tuple) and len(preds) > 0:
-                        raw_text = str(preds[0])
+                # 提取识别文本（ONNX 格式）
+                if isinstance(asr_result, list) and len(asr_result) > 0:
+                    first_item = asr_result[0]
+                    if isinstance(first_item, dict) and "text" in first_item:
+                        raw_text = first_item["text"]
+                    elif isinstance(first_item, dict) and "preds" in first_item:
+                        preds = first_item["preds"]
+                        raw_text = str(preds[0]) if isinstance(preds, tuple) and preds else str(preds)
                     else:
-                        raw_text = str(preds)
+                        raw_text = str(first_item)
                 else:
-                    raw_text = str(first_item)
-            else:
-                raw_text = str(asr_result)
+                    raw_text = str(asr_result)
 
-            logger.info(f"ASR识别完成，原始文本: {raw_text[:100]}...")
+                # 标点恢复
+                final_text = raw_text
+                if default_options["use_punc"] and self.punc_model and raw_text.strip():
+                    try:
+                        punc_result = self.punc_model(raw_text)
+                        if isinstance(punc_result, tuple) and len(punc_result) > 0:
+                            final_text = str(punc_result[0])
+                        else:
+                            final_text = str(punc_result)
+                        logger.info("标点恢复完成")
+                    except Exception as e:
+                        logger.warning(f"标点恢复失败，使用原始文本: {str(e)}")
+                engine_used = "paraformer"
 
-            # 使用标点恢复（ONNX 的 CT_Transformer 直接调用）
-            final_text = raw_text
-            if default_options["use_punc"] and self.punc_model and raw_text.strip():
-                try:
-                    # funasr_onnx.CT_Transformer 返回 (text_with_punc, punc_list)
-                    punc_result = self.punc_model(raw_text)
-                    if isinstance(punc_result, tuple) and len(punc_result) > 0:
-                        final_text = str(punc_result[0])
-                    else:
-                        final_text = str(punc_result)
-                    logger.info("标点恢复完成")
-                except Exception as e:
-                    logger.warning(f"标点恢复失败，使用原始文本: {str(e)}")
+            logger.info(f"ASR识别完成（{engine_used}），原始文本: {raw_text[:100]}...")
 
-            duration = self._get_audio_duration(audio_path)
             self.transcription_count += 1
 
             result = {
                 "success": True,
                 "text": final_text,
                 "raw_text": raw_text,
-                "confidence": (
-                    getattr(asr_result[0], "confidence", 0.0)
-                    if isinstance(asr_result, list)
-                    else 0.0
-                ),
-                "duration": duration,
+                "confidence": 0.0,
+                "duration": audio_duration,
                 "language": "zh-CN",
-                "model_type": (
-                    "onnx" if "onnx" in str(self.model_names.get("asr", "")).lower() else "pytorch"
-                ),
+                "engine": engine_used,
                 "models": self.model_names,
             }
 

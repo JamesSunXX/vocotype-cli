@@ -33,6 +33,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "language": "zh",
         "hotword": "",
         "batch_size_s": 60.0,
+        # 双引擎时长阈值（秒）：>= 此值用 SenseVoice，< 此值用 Paraformer
+        "sensevoice_threshold": 2.0,
     },
     # 火山引擎 BigASR 流式识别配置（仅当 backend == "volcengine" 时生效）
     # 文档：https://www.volcengine.com/docs/6561/1354869
