@@ -310,6 +310,18 @@ class TranscriptionWorker:
 
     def _capture_loop(self) -> None:
         queue_obj = self.audio.queue
+        # 静音自动停止配置
+        auto_stop_ms = self._audio_cfg.get("auto_stop_silence_ms", 0)
+        if auto_stop_ms > 0:
+            silence_threshold = self._audio_cfg.get("silence_rms_threshold", 200)
+            sample_rate = self._audio_cfg["sample_rate"]
+            # 需要连续静音的采样数
+            silence_samples_needed = int(sample_rate * auto_stop_ms / 1000)
+            silence_samples_count = 0
+            has_speech = False  # 是否检测到过语音（避免刚开始就停止）
+        else:
+            silence_samples_needed = 0
+
         while self._recording.is_set():
             try:
                 frame = queue_obj.get(timeout=0.2)
@@ -327,9 +339,25 @@ class TranscriptionWorker:
                         arr = np.frombuffer(frame, dtype=np.int16)
                         self._buffer.append(arr)
                         bytes_added = arr.nbytes
+                        frame = arr
                     self._session_bytes += bytes_added
             except Exception as exc:
                 logger.error("处理音频帧时出错: %s", exc)
+                continue
+
+            # 静音检测：连续静音超过阈值自动停止
+            if auto_stop_ms > 0 and not self._stop_requested.is_set():
+                rms = np.sqrt(np.mean(frame.astype(np.float32) ** 2))
+                if rms < silence_threshold:
+                    silence_samples_count += len(frame)
+                else:
+                    silence_samples_count = 0
+                    has_speech = True
+                # 必须先检测到语音，再检测静音超时
+                if has_speech and silence_samples_count >= silence_samples_needed:
+                    logger.info("检测到连续静音 %dms，自动停止录音", auto_stop_ms)
+                    self.stop(_from_capture_thread=True)
+                    break
 
             # 达到单次会话大小上限后，自动停止录音
             if self._session_bytes >= self._max_session_bytes and not self._stop_requested.is_set():
@@ -340,9 +368,8 @@ class TranscriptionWorker:
                     self._session_bytes / (1024 * 1024),
                     self._max_session_bytes / (1024 * 1024),
                 )
-                # 从capture线程调用stop，传入标志避免死锁
                 self.stop(_from_capture_thread=True)
-                break  # 停止后立即退出循环
+                break
 
         with self._buffer_lock:
             frame_count = len(self._buffer)
