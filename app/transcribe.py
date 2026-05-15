@@ -448,10 +448,32 @@ class TranscriptionWorker:
         self.last_segment_path = recent_path
 
     def _transcribe_once(self, samples: np.ndarray) -> None:
+        # 降噪预处理
+        if self.config.get("audio", {}).get("noise_reduce", True):
+            samples = self._denoise(samples)
+
         if self._backend == "volcengine":
             self._transcribe_once_volcengine(samples)
         else:
             self._transcribe_once_funasr(samples)
+
+    def _denoise(self, samples: np.ndarray) -> np.ndarray:
+        """对音频进行降噪处理"""
+        try:
+            import noisereduce as nr
+            float_audio = samples.astype(np.float32) / 32768.0
+            reduced = nr.reduce_noise(
+                y=float_audio,
+                sr=self._audio_cfg["sample_rate"],
+                stationary=True,
+                prop_decrease=0.75,
+            )
+            result = (reduced * 32768.0).clip(-32768, 32767).astype(np.int16)
+            logger.debug("音频降噪完成")
+            return result
+        except Exception as exc:
+            logger.warning("降噪失败，使用原始音频: %s", exc)
+            return samples
 
     def _transcribe_once_funasr(self, samples: np.ndarray) -> None:
         """使用本地 FunASR 进行转录。"""

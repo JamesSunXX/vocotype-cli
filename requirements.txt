@@ -3,7 +3,9 @@ pynput==1.8.1
 pyperclip==1.11.0
 librosa==0.11.0
 soundfile==0.13.1
+noisereduce==3.0.3
 funasr_onnx==0.4.1
+funasr>=1.1.0
 jieba==0.42.1
 
 # Volcengine BigASR 流式识别（backend == "volcengine" 时需要）
