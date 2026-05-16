@@ -317,13 +317,10 @@ class TranscriptionWorker:
             silence_samples_needed = int(sample_rate * auto_stop_ms / 1000)
             silence_samples_count = 0
             has_speech = False
-            # 动态阈值：先采集底噪，用底噪 * 倍数作为语音判定线
-            noise_floor_samples = int(sample_rate * 0.3)  # 前 300ms 采样底噪
-            noise_floor_collected = 0
-            noise_rms_sum = 0.0
-            noise_rms_count = 0
-            silence_threshold = self._audio_cfg.get("silence_rms_threshold", 0)  # 0 表示自动
-            logger.info("静音自动停止已启用: %dms, 阈值=%s", auto_stop_ms, silence_threshold or "自动")
+            # 峰值跟踪法：记录说话时的峰值 RMS，低于峰值 40% 视为静音
+            peak_rms = 0.0
+            speech_threshold_ratio = self._audio_cfg.get("silence_ratio", 0.4)
+            logger.info("静音自动停止已启用: %dms, 比例=%.0f%%", auto_stop_ms, speech_threshold_ratio * 100)
         else:
             silence_samples_needed = 0
 
@@ -350,32 +347,24 @@ class TranscriptionWorker:
                 logger.error("处理音频帧时出错: %s", exc)
                 continue
 
-            # 静音检测：连续静音超过阈值自动停止
+            # 静音检测：RMS 低于峰值的 ratio 比例时视为静音
             if auto_stop_ms > 0 and not self._stop_requested.is_set():
                 rms = np.sqrt(np.mean(frame.astype(np.float32) ** 2))
 
-                # 动态阈值：前 300ms 采样底噪
-                if silence_threshold == 0 and noise_floor_collected < noise_floor_samples:
-                    noise_rms_sum += rms
-                    noise_rms_count += 1
-                    noise_floor_collected += len(frame)
-                    if noise_floor_collected >= noise_floor_samples:
-                        avg_noise = noise_rms_sum / noise_rms_count
-                        silence_threshold = avg_noise * 1.8
-                        logger.info("底噪采样完成: 平均RMS=%.0f, 静音阈值=%.0f", avg_noise, silence_threshold)
-                    continue
-
-                if silence_threshold == 0:
-                    continue
-
-                if rms < silence_threshold:
-                    silence_samples_count += len(frame)
-                else:
-                    silence_samples_count = 0
+                # 更新峰值（衰减式，避免瞬间噪声干扰）
+                if rms > peak_rms:
+                    peak_rms = rms
                     has_speech = True
-                # 必须先检测到语音，再检测静音超时
+                    silence_samples_count = 0
+                elif has_speech:
+                    # 说话结束后检测静音
+                    if rms < peak_rms * speech_threshold_ratio:
+                        silence_samples_count += len(frame)
+                    else:
+                        silence_samples_count = 0
+
                 if has_speech and silence_samples_count >= silence_samples_needed:
-                    logger.info("检测到连续静音 %dms，自动停止录音", auto_stop_ms)
+                    logger.info("检测到连续静音 %dms（峰值=%.0f，当前=%.0f），自动停止录音", auto_stop_ms, peak_rms, rms)
                     self.stop(_from_capture_thread=True)
                     break
 
