@@ -317,9 +317,9 @@ class TranscriptionWorker:
             silence_samples_needed = int(sample_rate * auto_stop_ms / 1000)
             silence_samples_count = 0
             has_speech = False
-            # 峰值跟踪法：记录说话时的峰值 RMS，低于峰值 40% 视为静音
+            # 峰值跟踪法：记录说话时的峰值 RMS，低于峰值 75% 视为静音
             peak_rms = 0.0
-            speech_threshold_ratio = self._audio_cfg.get("silence_ratio", 0.4)
+            speech_threshold_ratio = self._audio_cfg.get("silence_ratio", 0.75)
             logger.info("静音自动停止已启用: %dms, 比例=%.0f%%", auto_stop_ms, speech_threshold_ratio * 100)
         else:
             silence_samples_needed = 0
@@ -351,13 +351,12 @@ class TranscriptionWorker:
             if auto_stop_ms > 0 and not self._stop_requested.is_set():
                 rms = np.sqrt(np.mean(frame.astype(np.float32) ** 2))
 
-                # 更新峰值（衰减式，避免瞬间噪声干扰）
+                # 更新峰值
                 if rms > peak_rms:
                     peak_rms = rms
                     has_speech = True
                     silence_samples_count = 0
                 elif has_speech:
-                    # 说话结束后检测静音
                     if rms < peak_rms * speech_threshold_ratio:
                         silence_samples_count += len(frame)
                     else:
