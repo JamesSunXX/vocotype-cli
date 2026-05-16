@@ -313,7 +313,7 @@ class TranscriptionWorker:
         # 静音自动停止配置
         auto_stop_ms = self._audio_cfg.get("auto_stop_silence_ms", 0)
         if auto_stop_ms > 0:
-            silence_threshold = self._audio_cfg.get("silence_rms_threshold", 500)
+            silence_threshold = self._audio_cfg.get("silence_rms_threshold", 800)
             sample_rate = self._audio_cfg["sample_rate"]
             # 需要连续静音的采样数
             silence_samples_needed = int(sample_rate * auto_stop_ms / 1000)
@@ -354,6 +354,9 @@ class TranscriptionWorker:
                 else:
                     silence_samples_count = 0
                     has_speech = True
+                # 每秒打印一次 RMS（调试用）
+                if silence_samples_count == 0 or silence_samples_count % sample_rate < len(frame):
+                    logger.debug("当前 RMS=%.0f, 静音计数=%d/%d", rms, silence_samples_count, silence_samples_needed)
                 # 必须先检测到语音，再检测静音超时
                 if has_speech and silence_samples_count >= silence_samples_needed:
                     logger.info("检测到连续静音 %dms，自动停止录音", auto_stop_ms)
