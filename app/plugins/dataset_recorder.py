@@ -43,6 +43,7 @@ def wrap_result_handler(
     logger.info("数据集记录器已启用，数据将保存到: %s", base.absolute())
 
     def _atomic_copy(src: Path, dst: Path) -> None:
+        dst.parent.mkdir(parents=True, exist_ok=True)
         tmp = dst.with_suffix(dst.suffix + ".tmp")
         shutil.copy2(src, tmp)
         os.replace(tmp, dst)
